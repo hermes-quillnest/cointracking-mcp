@@ -1,4 +1,4 @@
-# cointracking-go
+# cointracking-mcp
 
 An MCP (Model Context Protocol) server that gives Claude (Code or Desktop)
 access to your [CoinTracking](https://cointracking.info/) account, so you can
@@ -14,7 +14,7 @@ go build -o bin/cointracking-mcp ./cmd/mcp
 claude mcp add cointracking \
   -e COINTRACKING_KEY=your_key \
   -e COINTRACKING_SECRET=your_secret \
-  -- /absolute/path/to/cointracking-go/bin/cointracking-mcp
+  -- /absolute/path/to/cointracking-mcp/bin/cointracking-mcp
 ```
 
 Get a key/secret at https://cointracking.info/settings/api — grant only the

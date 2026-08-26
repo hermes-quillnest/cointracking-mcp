@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"os"
 
-	ct "cointracking-go/cointracking"
+	ct "cointracking-mcp/cointracking"
 )
 
 func main() {

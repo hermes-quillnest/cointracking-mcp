@@ -19,7 +19,7 @@ import (
 	"log"
 	"os"
 
-	ct "cointracking-go/cointracking"
+	ct "cointracking-mcp/cointracking"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

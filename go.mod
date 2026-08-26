@@ -1,4 +1,4 @@
-module cointracking-go
+module cointracking-mcp
 
 go 1.26.1
 
