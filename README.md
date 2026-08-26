@@ -116,7 +116,7 @@ methods yet.
 ### Layout
 
 ```
-cointracking/     library package — the API client (Call, GetBalance, GetGroupedBalance, GetTrades, ...)
+pkg/cointracking/ library package — the API client (Call, GetBalance, GetGroupedBalance, GetTrades, ...)
 cmd/cli/          command-line tool, mainly for ad-hoc testing (go run ./cmd/cli ...)
 cmd/mcp/          the MCP server (see above)
 ```
@@ -181,7 +181,7 @@ normal use.
 
 ### Testing
 
-`cointracking/cointracking_test.go` covers `Call()` and all three typed
+`pkg/cointracking/cointracking_test.go` covers `Call()` and all three typed
 methods against a mock HTTP server (`net/http/httptest`) seeded with
 response bodies matching CoinTracking's actual documented JSON shape — no
 live API key needed:

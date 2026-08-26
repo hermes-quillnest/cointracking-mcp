@@ -22,7 +22,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	ct "cointracking-mcp/cointracking"
+	ct "cointracking-mcp/pkg/cointracking"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

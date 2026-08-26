@@ -19,7 +19,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	ct "cointracking-mcp/cointracking"
+	ct "cointracking-mcp/pkg/cointracking"
 )
 
 const usage = `usage: cointracking-cli [method] [key=value ...]
