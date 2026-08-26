@@ -1,4 +1,4 @@
-package main
+package cointracking
 
 import (
 	"encoding/json"
@@ -248,7 +248,7 @@ func keysOf(m map[string]Trade) []string {
 }
 
 func TestParseExtraParams(t *testing.T) {
-	params, warnings := parseExtraParams([]string{"price=best", "currency=BTC", "malformed"})
+	params, warnings := ParseExtraParams([]string{"price=best", "currency=BTC", "malformed"})
 	if got := params.Get("price"); got != "best" {
 		t.Errorf("price = %q, want best", got)
 	}

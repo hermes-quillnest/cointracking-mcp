@@ -1,22 +1,14 @@
-// Quick PoC client for the CoinTracking API (https://cointracking.info/api/).
+// Package cointracking is a minimal client for the CoinTracking API
+// (https://cointracking.info/api/).
 //
 // CoinTracking's v1 API is a single POST endpoint. Every request needs:
-//   - a "method" form field (e.g. getBalance, getGroupedBalance, getHistory)
+//   - a "method" form field (e.g. getBalance, getGroupedBalance, getTrades)
 //   - a "nonce" form field that must strictly increase between requests
 //   - a "Key" header with your API key
 //   - a "Sign" header: hex(HMAC-SHA512(url-encoded form body, api_secret))
 //
 // Get an API key/secret at: https://cointracking.info/settings/api
-//
-// Usage:
-//
-//	export COINTRACKING_KEY=xxxx
-//	export COINTRACKING_SECRET=xxxx
-//	go run . getGroupedBalance   // typed
-//	go run . getBalance          // typed
-//	go run . getTrades           // typed
-//	go run . getGains            // falls through to untyped Call()
-package main
+package cointracking
 
 import (
 	"bytes"
@@ -36,8 +28,16 @@ import (
 
 const apiURL = "https://cointracking.info/api/v1/"
 
-// baseURL lets tests point Call() at a mock server; production always uses apiURL.
-var baseURL = apiURL
+// baseURL is the endpoint Call() posts to. It defaults to the real
+// CoinTracking API but can be overridden via the COINTRACKING_BASE_URL env
+// var (useful for pointing at a mock/sandbox server in tests and manual
+// verification) or directly in tests via package-internal assignment.
+var baseURL = func() string {
+	if v := os.Getenv("COINTRACKING_BASE_URL"); v != "" {
+		return v
+	}
+	return apiURL
+}()
 
 // Client is a minimal CoinTracking API client.
 type Client struct {
@@ -46,6 +46,7 @@ type Client struct {
 	HTTP   *http.Client
 }
 
+// NewClient builds a Client with a sane default HTTP timeout.
 func NewClient(key, secret string) *Client {
 	return &Client{
 		Key:    key,
@@ -138,7 +139,7 @@ func (c *Client) Call(method string, params url.Values) (json.RawMessage, error)
 // --- Typed convenience methods ---------------------------------------------
 //
 // These wrap Call() for the three most commonly used CoinTracking methods and
-// decode the JSON "return" payload into Go structs instead of raw JSON.
+// decode the JSON response fields into Go structs instead of raw JSON.
 // Amounts/values are kept as strings (not float64): CoinTracking returns
 // arbitrary-precision decimals and round-tripping through float64 can lose
 // precision. Parse with strconv.ParseFloat (or a decimal lib) as needed.
@@ -165,7 +166,7 @@ type BalanceSummary struct {
 	ProfitBTC  string `json:"profit_btc"`
 }
 
-// BalanceResult is the typed "return" payload of the getBalance method.
+// BalanceResult is the typed response payload of the getBalance method.
 type BalanceResult struct {
 	AccountCurrency string                 `json:"account_currency"`
 	Details         map[string]CoinBalance `json:"details"`
@@ -195,7 +196,7 @@ type GroupEntry struct {
 	BTC    string `json:"btc"`
 }
 
-// GroupedBalanceResult is the typed "return" payload of getGroupedBalance.
+// GroupedBalanceResult is the typed response payload of getGroupedBalance.
 // Details is keyed by group name (e.g. exchange name), then by coin symbol
 // (plus the "TOTAL_SUMMARY" pseudo-coin per group).
 type GroupedBalanceResult struct {
@@ -310,12 +311,12 @@ func (c *Client) GetTrades(opts TradesOptions) (map[string]Trade, error) {
 	return out, nil
 }
 
-// parseExtraParams turns CLI args of the form "key=value" into url.Values,
-// used to pass method-specific parameters through to the untyped Call()
-// fallback (e.g. `go run . getGains price=best` or
-// `go run . getHistoricalCurrency currency=BTC`). Args without an "=" are
-// skipped and reported back as warning strings rather than aborting the run.
-func parseExtraParams(args []string) (url.Values, []string) {
+// ParseExtraParams turns "key=value" strings into url.Values, used to pass
+// method-specific parameters through to the untyped Call() (e.g. "price=best"
+// for getGains, or "currency=BTC" for getHistoricalCurrency). Entries without
+// an "=" are skipped and reported back as warning strings rather than
+// aborting.
+func ParseExtraParams(args []string) (url.Values, []string) {
 	params := url.Values{}
 	var warnings []string
 	for _, arg := range args {
@@ -327,52 +328,4 @@ func parseExtraParams(args []string) (url.Values, []string) {
 		params.Set(k, v)
 	}
 	return params, warnings
-}
-
-func main() {
-	key := os.Getenv("COINTRACKING_KEY")
-	secret := os.Getenv("COINTRACKING_SECRET")
-	if key == "" || secret == "" {
-		fmt.Fprintln(os.Stderr, "set COINTRACKING_KEY and COINTRACKING_SECRET env vars")
-		os.Exit(1)
-	}
-
-	method := "getGroupedBalance"
-	if len(os.Args) > 1 {
-		method = os.Args[1]
-	}
-
-	extraParams, warnings := parseExtraParams(os.Args[2:])
-	for _, w := range warnings {
-		fmt.Fprintln(os.Stderr, w)
-	}
-
-	c := NewClient(key, secret)
-
-	// Typed convenience methods have first-class subcommands; anything else
-	// falls through to the generic, untyped Call() with whatever key=value
-	// params were passed on the command line.
-	var result any
-	var err error
-	switch method {
-	case "getBalance":
-		result, err = c.GetBalance()
-	case "getGroupedBalance":
-		result, err = c.GetGroupedBalance(GroupedBalanceOptions{ExcludeDepWith: true})
-	case "getTrades":
-		result, err = c.GetTrades(TradesOptions{Order: "DESC", Limit: 50})
-	default:
-		result, err = c.Call(method, extraParams)
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
-
-	out, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: encode result:", err)
-		os.Exit(1)
-	}
-	fmt.Println(string(out))
 }
