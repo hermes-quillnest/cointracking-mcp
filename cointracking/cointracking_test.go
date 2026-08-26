@@ -1,9 +1,11 @@
 package cointracking
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -41,11 +43,11 @@ func startMock(t *testing.T, responses map[string]string) *httptest.Server {
 	return srv
 }
 
-func withMockBaseURL(t *testing.T, url string) {
-	t.Helper()
-	old := baseURL
-	baseURL = url
-	t.Cleanup(func() { baseURL = old })
+// mockClient builds a Client pointed at the given test server.
+func mockClient(srv *httptest.Server) *Client {
+	c := NewClient("key", "secret")
+	c.BaseURL = srv.URL
+	return c
 }
 
 func TestGetBalance(t *testing.T) {
@@ -78,10 +80,8 @@ func TestGetBalance(t *testing.T) {
 			}
 		}`,
 	})
-	withMockBaseURL(t, srv.URL)
 
-	c := NewClient("key", "secret")
-	got, err := c.GetBalance()
+	got, err := mockClient(srv).GetBalance(context.Background())
 	if err != nil {
 		t.Fatalf("GetBalance() error = %v", err)
 	}
@@ -114,10 +114,8 @@ func TestGetGroupedBalance(t *testing.T) {
 			}
 		}`,
 	})
-	withMockBaseURL(t, srv.URL)
 
-	c := NewClient("key", "secret")
-	got, err := c.GetGroupedBalance(GroupedBalanceOptions{ExcludeDepWith: true})
+	got, err := mockClient(srv).GetGroupedBalance(context.Background(), GroupedBalanceOptions{ExcludeDepWith: true})
 	if err != nil {
 		t.Fatalf("GetGroupedBalance() error = %v", err)
 	}
@@ -161,16 +159,14 @@ func TestGetTrades(t *testing.T) {
 			}
 		}`,
 	})
-	withMockBaseURL(t, srv.URL)
 
-	c := NewClient("key", "secret")
-	got, err := c.GetTrades(TradesOptions{Order: "DESC", Limit: 50})
+	got, err := mockClient(srv).GetTrades(context.Background(), TradesOptions{Order: "DESC", Limit: 50})
 	if err != nil {
 		t.Fatalf("GetTrades() error = %v", err)
 	}
 	trade, ok := got["574025"]
 	if !ok {
-		t.Fatalf("expected trade 574025, got keys %v", keysOf(got))
+		t.Fatalf("expected trade 574025, got %d trades", len(got))
 	}
 	if trade.BuyCurrency != "BTC" || trade.SellCurrency != "USD" {
 		t.Errorf("trade currencies = buy:%q sell:%q, want BTC/USD", trade.BuyCurrency, trade.SellCurrency)
@@ -196,25 +192,14 @@ func TestGetTrades_BareNumberTimestamps(t *testing.T) {
 			"574025": {
 				"buy_amount": "0.50000000",
 				"buy_currency": "BTC",
-				"sell_amount": "900.20000000",
-				"sell_currency": "USD",
-				"fee_amount": "4.50000000",
-				"fee_currency": "USD",
-				"type": "Trade",
-				"exchange": "Kraken",
-				"group": "",
-				"comment": "This is a Kraken Trade",
-				"imported_from": "kraken",
 				"time": 1320442867,
 				"imported_time": 1391037169,
 				"trade_id": "43250"
 			}
 		}`,
 	})
-	withMockBaseURL(t, srv.URL)
 
-	c := NewClient("key", "secret")
-	got, err := c.GetTrades(TradesOptions{})
+	got, err := mockClient(srv).GetTrades(context.Background(), TradesOptions{})
 	if err != nil {
 		t.Fatalf("GetTrades() error = %v", err)
 	}
@@ -227,10 +212,8 @@ func TestCall_APIError(t *testing.T) {
 	srv := startMock(t, map[string]string{
 		"getBalance": `{"success":0,"method":"getBalance","error":"NO_METHOD","error_msg":"ERROR: Method not set"}`,
 	})
-	withMockBaseURL(t, srv.URL)
 
-	c := NewClient("key", "secret")
-	_, err := c.GetBalance()
+	_, err := mockClient(srv).GetBalance(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -239,12 +222,33 @@ func TestCall_APIError(t *testing.T) {
 	}
 }
 
-func keysOf(m map[string]Trade) []string {
-	ks := make([]string, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
+func TestCall_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html>upstream broke</html>"))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := mockClient(srv).Call(context.Background(), "getBalance", nil)
+	if err == nil {
+		t.Fatal("expected an error for a 502 response, got nil")
 	}
-	return ks
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("error = %v, want it to mention the HTTP status", err)
+	}
+}
+
+func TestCall_ContextCancelled(t *testing.T) {
+	srv := startMock(t, map[string]string{
+		"getBalance": `{"success":1,"method":"getBalance","account_currency":"EUR","details":{},"summary":{"value_fiat":"0","value_btc":"0","profit_fiat":"0","profit_btc":"0"}}`,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the call: it must not go through
+	_, err := mockClient(srv).GetBalance(ctx)
+	if err == nil {
+		t.Fatal("expected an error from a cancelled context, got nil")
+	}
 }
 
 func TestParseExtraParams(t *testing.T) {
@@ -260,16 +264,25 @@ func TestParseExtraParams(t *testing.T) {
 	}
 }
 
+func TestParseExtraParams_ValueWithEquals(t *testing.T) {
+	// Values containing '=' must survive: only the first '=' splits.
+	params, warnings := ParseExtraParams([]string{"comment=a=b=c"})
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if got := params.Get("comment"); got != "a=b=c" {
+		t.Errorf("comment = %q, want a=b=c", got)
+	}
+}
+
 // sanity check that json.RawMessage round-trips cleanly through Call's
 // field-stripping step (no leftover "success"/"method" keys).
 func TestCall_StripsEnvelopeKeys(t *testing.T) {
 	srv := startMock(t, map[string]string{
 		"getBalance": `{"success":1,"method":"getBalance","account_currency":"EUR","details":{},"summary":{"value_fiat":"0","value_btc":"0","profit_fiat":"0","profit_btc":"0"}}`,
 	})
-	withMockBaseURL(t, srv.URL)
 
-	c := NewClient("key", "secret")
-	raw, err := c.Call("getBalance", nil)
+	raw, err := mockClient(srv).Call(context.Background(), "getBalance", nil)
 	if err != nil {
 		t.Fatalf("Call() error = %v", err)
 	}
@@ -284,5 +297,46 @@ func TestCall_StripsEnvelopeKeys(t *testing.T) {
 	}
 	if _, present := fields["account_currency"]; !present {
 		t.Errorf("expected account_currency to survive stripping, got %v", fields)
+	}
+}
+
+func TestNextNonce_StrictlyIncreasing(t *testing.T) {
+	// Successive nonces must strictly increase even when generated faster
+	// than the millisecond clock ticks — CoinTracking rejects reused nonces.
+	prev := nextNonce()
+	for i := 0; i < 10_000; i++ {
+		n := nextNonce()
+		if n <= prev {
+			t.Fatalf("nonce did not increase: %d then %d (iteration %d)", prev, n, i)
+		}
+		prev = n
+	}
+}
+
+func TestNonce_SentIncreasing(t *testing.T) {
+	// End-to-end: two back-to-back calls must send strictly increasing
+	// nonce form values.
+	var nonces []int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		n, err := strconv.ParseInt(r.FormValue("nonce"), 10, 64)
+		if err != nil {
+			t.Errorf("bad nonce %q: %v", r.FormValue("nonce"), err)
+		}
+		nonces = append(nonces, n)
+		_, _ = w.Write([]byte(`{"success":1,"method":"getBalance","account_currency":"EUR","details":{},"summary":{"value_fiat":"0","value_btc":"0","profit_fiat":"0","profit_btc":"0"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := mockClient(srv)
+	for i := 0; i < 5; i++ {
+		if _, err := c.GetBalance(context.Background()); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	for i := 1; i < len(nonces); i++ {
+		if nonces[i] <= nonces[i-1] {
+			t.Fatalf("nonces not strictly increasing: %v", nonces)
+		}
 	}
 }

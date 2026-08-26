@@ -11,7 +11,7 @@
 package cointracking
 
 import (
-	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha512"
 	"encoding/hex"
@@ -23,35 +23,66 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
-const apiURL = "https://cointracking.info/api/v1/"
+// DefaultAPIURL is the production CoinTracking API endpoint.
+const DefaultAPIURL = "https://cointracking.info/api/v1/"
 
-// baseURL is the endpoint Call() posts to. It defaults to the real
-// CoinTracking API but can be overridden via the COINTRACKING_BASE_URL env
-// var (useful for pointing at a mock/sandbox server in tests and manual
-// verification) or directly in tests via package-internal assignment.
-var baseURL = func() string {
-	if v := os.Getenv("COINTRACKING_BASE_URL"); v != "" {
-		return v
-	}
-	return apiURL
-}()
+// maxResponseBytes caps how much of a response body we are willing to read.
+// Historical endpoints legitimately return multiple MB; 64MB is far beyond
+// anything sane and exists only to bound memory on a misbehaving server.
+const maxResponseBytes = 64 << 20
 
-// Client is a minimal CoinTracking API client.
+// Client is a minimal CoinTracking API client. Construct it with NewClient.
 type Client struct {
-	Key    string
-	Secret string
-	HTTP   *http.Client
+	// BaseURL is the endpoint Call() posts to. NewClient sets it to
+	// DefaultAPIURL, or to $COINTRACKING_BASE_URL when that is non-empty
+	// (useful for pointing at a mock/sandbox server).
+	BaseURL string
+	// HTTP is the underlying HTTP client. Override for custom timeouts or
+	// transports.
+	HTTP *http.Client
+
+	key    string
+	secret string
 }
 
-// NewClient builds a Client with a sane default HTTP timeout.
+// NewClient builds a Client. The default HTTP timeout is generous because
+// the historical endpoints (getHistoricalSummary, getHistoricalCurrency)
+// return the full daily history of the account — often several MB.
 func NewClient(key, secret string) *Client {
+	base := DefaultAPIURL
+	if v := os.Getenv("COINTRACKING_BASE_URL"); v != "" {
+		base = v
+	}
 	return &Client{
-		Key:    key,
-		Secret: secret,
-		HTTP:   &http.Client{Timeout: 15 * time.Second},
+		BaseURL: base,
+		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		key:     key,
+		secret:  secret,
+	}
+}
+
+// lastNonce backs nextNonce. Package-level (not per-client) on purpose:
+// CoinTracking requires nonces to strictly increase per API key, and two
+// Clients in one process may share a key.
+var lastNonce atomic.Int64
+
+// nextNonce returns unix-milliseconds, bumped as needed so that successive
+// calls are strictly increasing even within the same millisecond.
+func nextNonce() int64 {
+	for {
+		now := time.Now().UnixMilli()
+		prev := lastNonce.Load()
+		n := now
+		if n <= prev {
+			n = prev + 1
+		}
+		if lastNonce.CompareAndSwap(prev, n) {
+			return n
+		}
 	}
 }
 
@@ -69,30 +100,39 @@ type envelopeMeta struct {
 	ErrorMsg string `json:"error_msg"`
 }
 
+// snippet renders a response body for inclusion in an error message without
+// letting a huge (or hostile) body blow up the error string.
+func snippet(b []byte) string {
+	const max = 2048
+	if len(b) <= max {
+		return string(b)
+	}
+	return fmt.Sprintf("%s... (%d bytes total)", b[:max], len(b))
+}
+
 // Call invokes any CoinTracking API method and returns the data fields of the
 // response (everything except success/method/error/error_msg) as a raw JSON
 // object, ready to unmarshal into a method-specific struct or map.
 // params holds extra method-specific fields (e.g. "coin", "limit"); pass nil for none.
-func (c *Client) Call(method string, params url.Values) (json.RawMessage, error) {
+func (c *Client) Call(ctx context.Context, method string, params url.Values) (json.RawMessage, error) {
 	if params == nil {
 		params = url.Values{}
 	}
 	params.Set("method", method)
-	// Nonce must increase every call; ms-since-epoch is a simple PoC choice.
-	params.Set("nonce", strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10))
+	params.Set("nonce", strconv.FormatInt(nextNonce(), 10))
 
 	body := params.Encode()
 
-	mac := hmac.New(sha512.New, []byte(c.Secret))
+	mac := hmac.New(sha512.New, []byte(c.secret))
 	mac.Write([]byte(body))
 	sign := hex.EncodeToString(mac.Sum(nil))
 
-	req, err := http.NewRequest(http.MethodPost, baseURL, bytes.NewBufferString(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL, strings.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Key", c.Key)
+	req.Header.Set("Key", c.key)
 	req.Header.Set("Sign", sign)
 
 	resp, err := c.HTTP.Do(req)
@@ -101,14 +141,20 @@ func (c *Client) Call(method string, params url.Values) (json.RawMessage, error)
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if len(raw) > maxResponseBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes, refusing to read further", maxResponseBytes)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http status %s (body=%s)", resp.Status, snippet(raw))
 	}
 
 	var meta envelopeMeta
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil, fmt.Errorf("decode response: %w (raw=%s)", err, raw)
+		return nil, fmt.Errorf("decode response: %w (raw=%s)", err, snippet(raw))
 	}
 	if meta.Success != 1 {
 		msg := meta.ErrorMsg
@@ -122,7 +168,7 @@ func (c *Client) Call(method string, params url.Values) (json.RawMessage, error)
 	// still as a flat JSON object.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, fmt.Errorf("decode response fields: %w (raw=%s)", err, raw)
+		return nil, fmt.Errorf("decode response fields: %w (raw=%s)", err, snippet(raw))
 	}
 	delete(fields, "success")
 	delete(fields, "method")
@@ -175,8 +221,8 @@ type BalanceResult struct {
 
 // GetBalance calls getBalance (no params) and decodes it into a BalanceResult.
 // Docs: https://cointracking.info/api/api.php#getBalance
-func (c *Client) GetBalance() (*BalanceResult, error) {
-	raw, err := c.Call("getBalance", nil)
+func (c *Client) GetBalance(ctx context.Context) (*BalanceResult, error) {
+	raw, err := c.Call(ctx, "getBalance", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +259,7 @@ type GroupedBalanceOptions struct {
 
 // GetGroupedBalance calls getGroupedBalance and decodes it into a typed result.
 // Docs: https://cointracking.info/api/api.php#getGroupedBalance
-func (c *Client) GetGroupedBalance(opts GroupedBalanceOptions) (*GroupedBalanceResult, error) {
+func (c *Client) GetGroupedBalance(ctx context.Context, opts GroupedBalanceOptions) (*GroupedBalanceResult, error) {
 	params := url.Values{}
 	if opts.Group != "" {
 		params.Set("group", opts.Group)
@@ -224,7 +270,7 @@ func (c *Client) GetGroupedBalance(opts GroupedBalanceOptions) (*GroupedBalanceR
 	if opts.Type != "" {
 		params.Set("type", opts.Type)
 	}
-	raw, err := c.Call("getGroupedBalance", params)
+	raw, err := c.Call(ctx, "getGroupedBalance", params)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +329,7 @@ type TradesOptions struct {
 
 // GetTrades calls getTrades and decodes it into a map of trade id -> Trade.
 // Docs: https://cointracking.info/api/api.php#getTrades
-func (c *Client) GetTrades(opts TradesOptions) (map[string]Trade, error) {
+func (c *Client) GetTrades(ctx context.Context, opts TradesOptions) (map[string]Trade, error) {
 	params := url.Values{}
 	if opts.Limit > 0 {
 		params.Set("limit", strconv.Itoa(opts.Limit))
@@ -300,7 +346,7 @@ func (c *Client) GetTrades(opts TradesOptions) (map[string]Trade, error) {
 	if opts.TradePrices {
 		params.Set("trade_prices", "1")
 	}
-	raw, err := c.Call("getTrades", params)
+	raw, err := c.Call(ctx, "getTrades", params)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,6 @@
-// Command mcp-server exposes the CoinTracking API as an MCP (Model Context
-// Protocol) server over stdio, for use with Claude Code, Claude Desktop, or
-// any other MCP client.
+// Command cointracking-mcp exposes the CoinTracking API as an MCP (Model
+// Context Protocol) server over stdio, for use with Claude Code, Claude
+// Desktop, or any other MCP client.
 //
 // Auth is read once at startup from COINTRACKING_KEY / COINTRACKING_SECRET
 // env vars (set them wherever you register the server, e.g. `claude mcp add`).
@@ -17,21 +17,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"os/signal"
+	"syscall"
 
 	ct "cointracking-mcp/cointracking"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-var client *ct.Client
+const serverVersion = "v0.2.0"
 
-// --- getBalance ---------------------------------------------------------
+// server bundles the API client with the tool handlers, so handlers don't
+// reach for package-level globals.
+type server struct {
+	client *ct.Client
+}
+
+// --- getBalance -------------------------------------------------------------
 
 type getBalanceInput struct{}
 
-func handleGetBalance(_ context.Context, _ *mcp.CallToolRequest, _ getBalanceInput) (*mcp.CallToolResult, ct.BalanceResult, error) {
-	res, err := client.GetBalance()
+func (s *server) handleGetBalance(ctx context.Context, _ *mcp.CallToolRequest, _ getBalanceInput) (*mcp.CallToolResult, ct.BalanceResult, error) {
+	res, err := s.client.GetBalance(ctx)
 	if err != nil {
 		// The SDK validates the typed output against its auto-generated
 		// schema even on the error path, so the zero value must still be
@@ -41,18 +50,25 @@ func handleGetBalance(_ context.Context, _ *mcp.CallToolRequest, _ getBalanceInp
 	return nil, *res, nil
 }
 
-// --- getGroupedBalance ---------------------------------------------------
+// --- getGroupedBalance ------------------------------------------------------
 
 type getGroupedBalanceInput struct {
 	Group          string `json:"group,omitempty" jsonschema:"group balance by 'exchange' (default), 'group', or 'type'"`
-	ExcludeDepWith bool   `json:"exclude_dep_with,omitempty" jsonschema:"exclude deposits and withdrawals from the totals (recommended in most cases); defaults to true"`
+	ExcludeDepWith *bool  `json:"exclude_dep_with,omitempty" jsonschema:"exclude deposits and withdrawals from the totals; defaults to true (recommended), pass false to include them"`
 	Type           string `json:"type,omitempty" jsonschema:"restrict to a single CoinTracking transaction type, e.g. 'Trade'"`
 }
 
-func handleGetGroupedBalance(_ context.Context, _ *mcp.CallToolRequest, in getGroupedBalanceInput) (*mcp.CallToolResult, ct.GroupedBalanceResult, error) {
-	res, err := client.GetGroupedBalance(ct.GroupedBalanceOptions{
+func (s *server) handleGetGroupedBalance(ctx context.Context, _ *mcp.CallToolRequest, in getGroupedBalanceInput) (*mcp.CallToolResult, ct.GroupedBalanceResult, error) {
+	// The schema documents exclude_dep_with as defaulting to true, so an
+	// omitted field must actually mean true — hence *bool, not bool (whose
+	// zero value would silently flip the default to false).
+	excludeDepWith := true
+	if in.ExcludeDepWith != nil {
+		excludeDepWith = *in.ExcludeDepWith
+	}
+	res, err := s.client.GetGroupedBalance(ctx, ct.GroupedBalanceOptions{
 		Group:          in.Group,
-		ExcludeDepWith: in.ExcludeDepWith,
+		ExcludeDepWith: excludeDepWith,
 		Type:           in.Type,
 	})
 	if err != nil {
@@ -61,7 +77,7 @@ func handleGetGroupedBalance(_ context.Context, _ *mcp.CallToolRequest, in getGr
 	return nil, *res, nil
 }
 
-// --- getTrades -------------------------------------------------------------
+// --- getTrades --------------------------------------------------------------
 
 type getTradesInput struct {
 	Limit       int    `json:"limit,omitempty" jsonschema:"max number of trades to return; 0 means all"`
@@ -75,12 +91,12 @@ type getTradesOutput struct {
 	Trades map[string]ct.Trade `json:"trades"`
 }
 
-func handleGetTrades(_ context.Context, _ *mcp.CallToolRequest, in getTradesInput) (*mcp.CallToolResult, getTradesOutput, error) {
+func (s *server) handleGetTrades(ctx context.Context, _ *mcp.CallToolRequest, in getTradesInput) (*mcp.CallToolResult, getTradesOutput, error) {
 	order := in.Order
 	if order == "" {
 		order = "DESC"
 	}
-	res, err := client.GetTrades(ct.TradesOptions{
+	res, err := s.client.GetTrades(ctx, ct.TradesOptions{
 		Limit:       in.Limit,
 		Order:       order,
 		Start:       in.Start,
@@ -93,22 +109,24 @@ func handleGetTrades(_ context.Context, _ *mcp.CallToolRequest, in getTradesInpu
 	return nil, getTradesOutput{Trades: res}, nil
 }
 
-// --- generic call ------------------------------------------------------
+// --- generic call -----------------------------------------------------------
 
 type callInput struct {
 	Method string            `json:"method" jsonschema:"CoinTracking API method name, e.g. getGains, getHistoricalSummary, getHistoricalCurrency, getLedger, getTradesByUser"`
 	Params map[string]string `json:"params,omitempty" jsonschema:"extra method-specific form params as key/value pairs, e.g. {\"price\":\"best\"} for getGains or {\"currency\":\"BTC\"} for getHistoricalCurrency"`
 }
 
-func handleCall(_ context.Context, _ *mcp.CallToolRequest, in callInput) (*mcp.CallToolResult, any, error) {
+func (s *server) handleCall(ctx context.Context, _ *mcp.CallToolRequest, in callInput) (*mcp.CallToolResult, any, error) {
 	if in.Method == "" {
 		return errResult(fmt.Errorf("method is required")), nil, nil
 	}
-	params, warnings := ct.ParseExtraParams(paramsToArgs(in.Params))
-	for _, w := range warnings {
-		log.Println(w)
+	// Build url.Values directly from the map — no "k=v" string round-trip,
+	// which would mangle keys or values containing '='.
+	params := url.Values{}
+	for k, v := range in.Params {
+		params.Set(k, v)
 	}
-	raw, err := client.Call(in.Method, params)
+	raw, err := s.client.Call(ctx, in.Method, params)
 	if err != nil {
 		return errResult(err), nil, nil
 	}
@@ -117,14 +135,6 @@ func handleCall(_ context.Context, _ *mcp.CallToolRequest, in callInput) (*mcp.C
 		return errResult(fmt.Errorf("decode response: %w", err)), nil, nil
 	}
 	return nil, out, nil
-}
-
-func paramsToArgs(params map[string]string) []string {
-	args := make([]string, 0, len(params))
-	for k, v := range params {
-		args = append(args, k+"="+v)
-	}
-	return args
 }
 
 // errResult turns a Go error into a CallToolResult marked as an error, so
@@ -136,37 +146,63 @@ func errResult(err error) *mcp.CallToolResult {
 	}
 }
 
+// readOnly marks a tool as non-mutating: every CoinTracking API method is a
+// read; nothing this server does can alter the account.
+func readOnly(title string) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		Title:        title,
+		ReadOnlyHint: true,
+	}
+}
+
+func newMCPServer(client *ct.Client) *mcp.Server {
+	s := &server{client: client}
+
+	srv := mcp.NewServer(&mcp.Implementation{Name: "cointracking", Version: serverVersion}, nil)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "cointracking_get_balance",
+		Description: "Get the current CoinTracking account and per-coin balance (amounts, fiat/BTC value, price trends).",
+		Annotations: readOnly("Get balance"),
+	}, s.handleGetBalance)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "cointracking_get_grouped_balance",
+		Description: "Get the current balance grouped by exchange, trade-group, or transaction type.",
+		Annotations: readOnly("Get grouped balance"),
+	}, s.handleGetGroupedBalance)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "cointracking_get_trades",
+		Description: "Get CoinTracking trades and transactions (trade, deposit, withdrawal, income, etc.), most recent first by default.",
+		Annotations: readOnly("Get trades"),
+	}, s.handleGetTrades)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "cointracking_call",
+		Description: "Call any CoinTracking API method directly (e.g. getGains, getHistoricalSummary, getHistoricalCurrency, getLedger, getTradesByUser) with raw key/value params. Use this for methods without a dedicated tool. Note: getHistoricalSummary and getHistoricalCurrency ignore date filters and return the full daily history — expect a large response.",
+		Annotations: readOnly("Call any CoinTracking method"),
+	}, s.handleCall)
+
+	return srv
+}
+
 func main() {
+	log.SetFlags(0) // stderr goes to the MCP client's log; timestamps are added there
+
 	key := os.Getenv("COINTRACKING_KEY")
 	secret := os.Getenv("COINTRACKING_SECRET")
 	if key == "" || secret == "" {
 		log.Fatal("set COINTRACKING_KEY and COINTRACKING_SECRET env vars before starting the server")
 	}
-	client = ct.NewClient(key, secret)
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "cointracking", Version: "v0.1.0"}, nil)
+	// Shut down cleanly when the MCP client sends SIGINT/SIGTERM (or the
+	// terminal closes); in-flight HTTP requests are cancelled via ctx.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "cointracking_get_balance",
-		Description: "Get the current CoinTracking account and per-coin balance (amounts, fiat/BTC value, price trends).",
-	}, handleGetBalance)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "cointracking_get_grouped_balance",
-		Description: "Get the current balance grouped by exchange, trade-group, or transaction type.",
-	}, handleGetGroupedBalance)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "cointracking_get_trades",
-		Description: "Get CoinTracking trades and transactions (trade, deposit, withdrawal, income, etc.), most recent first by default.",
-	}, handleGetTrades)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "cointracking_call",
-		Description: "Call any CoinTracking API method directly (e.g. getGains, getHistoricalSummary, getHistoricalCurrency, getLedger, getTradesByUser) with raw key/value params. Use this for methods without a dedicated tool.",
-	}, handleCall)
-
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	srv := newMCPServer(ct.NewClient(key, secret))
+	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
 		log.Fatalf("server failed: %v", err)
 	}
 }

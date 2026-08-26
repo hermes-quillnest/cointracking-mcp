@@ -148,17 +148,22 @@ Build a standalone binary with `go build -o bin/cointracking-cli ./cmd/cli`.
 
 ### API surface (`cointracking` package)
 
-- `Client.Call(method string, params url.Values) (json.RawMessage, error)` —
+All methods take a `context.Context` (cancellation/timeouts propagate to the
+HTTP request):
+
+- `Client.Call(ctx, method string, params url.Values) (json.RawMessage, error)` —
   generic escape hatch for any CoinTracking method.
-- `Client.GetBalance() (*BalanceResult, error)` — wraps `getBalance`.
-- `Client.GetGroupedBalance(GroupedBalanceOptions) (*GroupedBalanceResult, error)` —
+- `Client.GetBalance(ctx) (*BalanceResult, error)` — wraps `getBalance`.
+- `Client.GetGroupedBalance(ctx, GroupedBalanceOptions) (*GroupedBalanceResult, error)` —
   wraps `getGroupedBalance` (group by exchange/group/type, optionally
   excluding deposits/withdrawals).
-- `Client.GetTrades(TradesOptions) (map[string]Trade, error)` — wraps
+- `Client.GetTrades(ctx, TradesOptions) (map[string]Trade, error)` — wraps
   `getTrades` (limit, order, time range, optional trade prices).
 - `ParseExtraParams([]string) (url.Values, []string)` — turns `"key=value"`
-  strings into request params; used by both `cmd/cli` and `cmd/mcp`'s
-  generic-call path.
+  strings into request params; used by `cmd/cli`'s generic-call path.
+
+Nonces are generated from unix-millis through a process-wide monotonic
+counter, so concurrent or rapid-fire calls can't reuse or reorder them.
 
 All amount/value fields are kept as `string`, not `float64` — CoinTracking
 returns arbitrary-precision decimals and round-tripping through float64 can
@@ -191,9 +196,7 @@ go test ./... -v
   only; every other method (e.g. `getHistoricalSummary`, `getGains`,
   `getLedger`) still goes through the untyped `Call()` (both CLI and MCP
   expose it).
-- Nonce is `unix millis`; if you fire requests faster than 1ms apart or reuse
-  an old nonce, CoinTracking will reject the call ("nonce must be greater...").
-- No rate-limit handling (CoinTracking limits calls per minute per key).
+- No rate-limit handling (CoinTracking limits calls per hour per key).
 - No pagination helpers, no retry/backoff.
 - The MCP server reads credentials once at startup from env vars; there's no
   per-call auth or multi-account support.
