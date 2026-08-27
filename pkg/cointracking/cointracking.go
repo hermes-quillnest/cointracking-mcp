@@ -329,6 +329,12 @@ type TradesOptions struct {
 
 // GetTrades calls getTrades and decodes it into a map of trade id -> Trade.
 // Docs: https://cointracking.info/api/api.php#getTrades
+//
+// When TradesOptions.TradePrices is set, CoinTracking adds an
+// "account_currency" field as a sibling of the trade-id entries (observed in
+// practice; not documented). That single extra key made a naive
+// map[string]Trade unmarshal fail outright, so it's stripped first — same
+// pattern Call() already uses for the envelope/control fields.
 func (c *Client) GetTrades(ctx context.Context, opts TradesOptions) (map[string]Trade, error) {
 	params := url.Values{}
 	if opts.Limit > 0 {
@@ -350,9 +356,18 @@ func (c *Client) GetTrades(ctx context.Context, opts TradesOptions) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	var out map[string]Trade
-	if err := json.Unmarshal(raw, &out); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, fmt.Errorf("decode getTrades: %w", err)
+	}
+	delete(fields, "account_currency")
+	out := make(map[string]Trade, len(fields))
+	for id, r := range fields {
+		var t Trade
+		if err := json.Unmarshal(r, &t); err != nil {
+			return nil, fmt.Errorf("decode getTrades: trade %s: %w", id, err)
+		}
+		out[id] = t
 	}
 	return out, nil
 }

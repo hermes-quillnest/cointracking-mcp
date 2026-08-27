@@ -89,6 +89,11 @@ methods yet.
 - **Historical entries are daily snapshots**, not exact timestamps — a "N
   days/months ago" question resolves to the closest available snapshot, not
   the literal calendar date.
+- **`getTrades` with `trade_prices=1` adds an `account_currency` sibling
+  field** alongside the trade-id entries (observed in practice, not in the
+  docs). `Client.GetTrades` strips it before decoding; if you're calling
+  `getTrades` via the untyped `cointracking_call`/`Call()` instead, expect
+  that extra key in the raw response.
 
 ## Troubleshooting
 
@@ -133,7 +138,10 @@ export COINTRACKING_SECRET=your_secret
 go run ./cmd/cli                    # defaults to getGroupedBalance
 go run ./cmd/cli getBalance
 go run ./cmd/cli getGroupedBalance
-go run ./cmd/cli getTrades
+go run ./cmd/cli getTrades                          # defaults: order=DESC, limit=50
+go run ./cmd/cli getTrades limit=0 order=ASC start=1514764800 end=1546300799
+                                                     # limit/order/start/end/trade_prices
+                                                     # are all forwarded now — limit=0 means "all"
 go run ./cmd/cli getGains price=best        # falls through to the generic Call()
 go run ./cmd/cli getHistoricalCurrency currency=BTC
 ```

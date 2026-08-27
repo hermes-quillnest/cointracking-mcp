@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -205,6 +206,86 @@ func TestGetTrades_BareNumberTimestamps(t *testing.T) {
 	}
 	if got["574025"].Time != 1320442867 {
 		t.Errorf("trade.Time = %d, want 1320442867", got["574025"].Time)
+	}
+}
+
+func TestGetTrades_TradePricesAccountCurrencySibling(t *testing.T) {
+	// With trade_prices=1, CoinTracking adds an "account_currency" field as
+	// a sibling of the trade-id entries (observed in practice, undocumented).
+	// GetTrades must strip it instead of failing to decode it as a Trade.
+	srv := startMock(t, map[string]string{
+		"getTrades": `{
+			"success": 1,
+			"method": "getTrades",
+			"574025": {
+				"buy_amount": "0.50000000",
+				"buy_currency": "BTC",
+				"sell_amount": "900.20000000",
+				"sell_currency": "USD",
+				"buy_value_in_cur": "900.20000000",
+				"buy_value_in_btc": "1.00000000",
+				"type": "Trade",
+				"exchange": "Kraken",
+				"time": "1320442867",
+				"imported_time": "1391037169",
+				"trade_id": "43250"
+			},
+			"account_currency": "EUR"
+		}`,
+	})
+
+	got, err := mockClient(srv).GetTrades(context.Background(), TradesOptions{TradePrices: true})
+	if err != nil {
+		t.Fatalf("GetTrades() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 trade (account_currency stripped), got %d: %+v", len(got), got)
+	}
+	if _, ok := got["account_currency"]; ok {
+		t.Errorf("account_currency leaked into the trades map: %+v", got)
+	}
+	if got["574025"].BuyCurrency != "BTC" {
+		t.Errorf("trade.BuyCurrency = %q, want BTC", got["574025"].BuyCurrency)
+	}
+}
+
+func TestGetTrades_HonorsLimitOrderStartEnd(t *testing.T) {
+	// Regression test for the CLI bug where limit/order/start/end/trade_prices
+	// passed on the command line were silently ignored: GetTrades itself must
+	// forward every option to the request params.
+	var gotParams url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotParams = r.Form
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":1,"method":"getTrades"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := mockClient(srv).GetTrades(context.Background(), TradesOptions{
+		Limit:       0, // "all" — must NOT default back to 50
+		Order:       "ASC",
+		Start:       1514764800,
+		End:         1546300799,
+		TradePrices: true,
+	})
+	if err != nil {
+		t.Fatalf("GetTrades() error = %v", err)
+	}
+	if gotParams.Get("order") != "ASC" {
+		t.Errorf("order param = %q, want ASC", gotParams.Get("order"))
+	}
+	if gotParams.Get("limit") != "" {
+		t.Errorf("limit param = %q, want unset (limit=0 means all)", gotParams.Get("limit"))
+	}
+	if gotParams.Get("start") != "1514764800" {
+		t.Errorf("start param = %q, want 1514764800", gotParams.Get("start"))
+	}
+	if gotParams.Get("end") != "1546300799" {
+		t.Errorf("end param = %q, want 1546300799", gotParams.Get("end"))
+	}
+	if gotParams.Get("trade_prices") != "1" {
+		t.Errorf("trade_prices param = %q, want 1", gotParams.Get("trade_prices"))
 	}
 }
 
