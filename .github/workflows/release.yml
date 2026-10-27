@@ -60,4 +60,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" dist/cointracking-mcp_* --clobber --repo "${{ github.repository }}"
+        # The matrix jobs upload to the same release at once, and GitHub's
+        # upload API occasionally answers 404 under that load. --clobber makes
+        # a retry safe.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh release upload "$TAG" dist/cointracking-mcp_* --clobber --repo "${{ github.repository }}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              echo "Upload attempt ${attempt} failed; retrying in $((attempt * 10))s"
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "Upload failed after 5 attempts"
+          exit 1
