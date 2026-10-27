@@ -1,0 +1,63 @@
+name: Release
+
+# Builds the MCP server for each platform and attaches the archives to the
+# release as soon as it is created.
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write # needed to upload release assets
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          mkdir -p dist/pkg
+          go build -trimpath -ldflags "-s -w" -o "dist/pkg/cointracking-mcp${ext}" ./cmd/mcp
+          cp LICENSE README.md dist/pkg/
+
+      - name: Package
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          name="cointracking-mcp_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          cd dist/pkg
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -q "../${name}.zip" *
+          else
+            tar -czf "../${name}.tar.gz" *
+          fi
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/cointracking-mcp_* --clobber --repo "${{ github.repository }}"
