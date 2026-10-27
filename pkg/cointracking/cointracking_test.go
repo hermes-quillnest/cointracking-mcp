@@ -250,9 +250,8 @@ func TestGetTrades_TradePricesAccountCurrencySibling(t *testing.T) {
 }
 
 func TestGetTrades_HonorsLimitOrderStartEnd(t *testing.T) {
-	// Regression test for the CLI bug where limit/order/start/end/trade_prices
-	// passed on the command line were silently ignored: GetTrades itself must
-	// forward every option to the request params.
+	// Regression test: GetTrades must forward every option
+	// (limit/order/start/end/trade_prices) to the request params.
 	var gotParams url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -329,30 +328,6 @@ func TestCall_ContextCancelled(t *testing.T) {
 	_, err := mockClient(srv).GetBalance(ctx)
 	if err == nil {
 		t.Fatal("expected an error from a cancelled context, got nil")
-	}
-}
-
-func TestParseExtraParams(t *testing.T) {
-	params, warnings := ParseExtraParams([]string{"price=best", "currency=BTC", "malformed"})
-	if got := params.Get("price"); got != "best" {
-		t.Errorf("price = %q, want best", got)
-	}
-	if got := params.Get("currency"); got != "BTC" {
-		t.Errorf("currency = %q, want BTC", got)
-	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], `"malformed"`) {
-		t.Errorf("warnings = %v, want exactly one mentioning \"malformed\"", warnings)
-	}
-}
-
-func TestParseExtraParams_ValueWithEquals(t *testing.T) {
-	// Values containing '=' must survive: only the first '=' splits.
-	params, warnings := ParseExtraParams([]string{"comment=a=b=c"})
-	if len(warnings) != 0 {
-		t.Fatalf("unexpected warnings: %v", warnings)
-	}
-	if got := params.Get("comment"); got != "a=b=c" {
-		t.Errorf("comment = %q, want a=b=c", got)
 	}
 }
 

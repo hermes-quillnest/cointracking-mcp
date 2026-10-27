@@ -371,22 +371,3 @@ func (c *Client) GetTrades(ctx context.Context, opts TradesOptions) (map[string]
 	}
 	return out, nil
 }
-
-// ParseExtraParams turns "key=value" strings into url.Values, used to pass
-// method-specific parameters through to the untyped Call() (e.g. "price=best"
-// for getGains, or "currency=BTC" for getHistoricalCurrency). Entries without
-// an "=" are skipped and reported back as warning strings rather than
-// aborting.
-func ParseExtraParams(args []string) (url.Values, []string) {
-	params := url.Values{}
-	var warnings []string
-	for _, arg := range args {
-		k, v, ok := strings.Cut(arg, "=")
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf("ignoring malformed param %q (want key=value)", arg))
-			continue
-		}
-		params.Set(k, v)
-	}
-	return params, warnings
-}

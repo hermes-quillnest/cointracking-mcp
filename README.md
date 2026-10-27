@@ -3,8 +3,7 @@
 An MCP (Model Context Protocol) server that gives Claude (Code or Desktop)
 access to your [CoinTracking](https://cointracking.info/) account, so you can
 ask about your portfolio in plain English instead of calling the CoinTracking
-API by hand. Built on a small Go client library, which also ships as a
-standalone CLI.
+API by hand. Built on a small Go client library.
 
 ## Setup
 
@@ -122,37 +121,8 @@ methods yet.
 
 ```
 pkg/cointracking/ library package — the API client (Call, GetBalance, GetGroupedBalance, GetTrades, ...)
-cmd/cli/          command-line tool, mainly for ad-hoc testing (go run ./cmd/cli ...)
 cmd/mcp/          the MCP server (see above)
 ```
-
-### CLI
-
-A thin wrapper around the same client, useful for testing calls without
-going through Claude:
-
-```sh
-export COINTRACKING_KEY=your_key
-export COINTRACKING_SECRET=your_secret
-
-go run ./cmd/cli                    # defaults to getGroupedBalance
-go run ./cmd/cli getBalance
-go run ./cmd/cli getGroupedBalance
-go run ./cmd/cli getTrades                          # defaults: order=DESC, limit=50
-go run ./cmd/cli getTrades limit=0 order=ASC start=1514764800 end=1546300799
-                                                     # limit/order/start/end/trade_prices
-                                                     # are all forwarded now — limit=0 means "all"
-go run ./cmd/cli getGains price=best        # falls through to the generic Call()
-go run ./cmd/cli getHistoricalCurrency currency=BTC
-```
-
-`getBalance`/`getGroupedBalance`/`getTrades` use the typed convenience
-methods; any other method name falls through to the generic, untyped
-`Call()`, with `key=value` CLI args forwarded as extra request params.
-Prints the pretty-printed JSON result from CoinTracking, or an error if the
-call fails (bad signature, invalid method, rate limit, etc.).
-
-Build a standalone binary with `go build -o bin/cointracking-cli ./cmd/cli`.
 
 ### API surface (`cointracking` package)
 
@@ -167,8 +137,6 @@ HTTP request):
   excluding deposits/withdrawals).
 - `Client.GetTrades(ctx, TradesOptions) (map[string]Trade, error)` — wraps
   `getTrades` (limit, order, time range, optional trade prices).
-- `ParseExtraParams([]string) (url.Values, []string)` — turns `"key=value"`
-  strings into request params; used by `cmd/cli`'s generic-call path.
 
 Nonces are generated from unix-millis through a process-wide monotonic
 counter, so concurrent or rapid-fire calls can't reuse or reorder them.
@@ -202,8 +170,8 @@ go test ./... -v
 
 - Typed wrappers exist for `getBalance`, `getGroupedBalance`, and `getTrades`
   only; every other method (e.g. `getHistoricalSummary`, `getGains`,
-  `getLedger`) still goes through the untyped `Call()` (both CLI and MCP
-  expose it).
+  `getLedger`) still goes through the untyped `Call()` (exposed by the
+  `cointracking_call` MCP tool).
 - No rate-limit handling (CoinTracking limits calls per hour per key).
 - No pagination helpers, no retry/backoff.
 - The MCP server reads credentials once at startup from env vars; there's no
