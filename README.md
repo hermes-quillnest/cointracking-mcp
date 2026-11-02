@@ -65,6 +65,45 @@ Reach for `cointracking_call` whenever a question involves *history* (past
 balances, portfolio value over time) — there are no typed wrappers for those
 methods yet.
 
+## Remote (HTTP) mode
+
+Besides stdio, the binary can serve MCP over Streamable HTTP, e.g. on a home
+server that several machines reach. It is stateless, serves `/mcp`, and
+requires a bearer token. `GET /healthz` answers `ok` without auth.
+
+```sh
+# on the server (values are read from the environment, never from flags)
+export COINTRACKING_KEY=...
+export COINTRACKING_SECRET=...
+export MCP_AUTH_TOKEN=$(openssl rand -hex 32)   # at least 32 chars; keep it, clients need it
+./cointracking-mcp -http 127.0.0.1:8080
+```
+
+`-http` can also come from `MCP_HTTP_ADDR`. The server refuses to start
+without a long enough `MCP_AUTH_TOKEN`.
+
+**Transport security.** The listener speaks plain HTTP unless you pass
+`-tls-cert` and `-tls-key`, and the token travels in a header, so don't expose
+plain HTTP beyond localhost. Pick one:
+
+- **Tailscale** (simplest at home): bind to `127.0.0.1:8080` and run
+  `tailscale serve --bg 8080`; clients use the `https://<machine>.<tailnet>.ts.net/mcp` URL.
+- **Reverse proxy** (Caddy, nginx) terminating TLS in front of `127.0.0.1:8080`.
+- **Built-in TLS** with `-tls-cert` / `-tls-key` for a certificate you already have.
+
+**Client (Claude Code):**
+
+```sh
+claude mcp add --transport http cointracking https://<host>/mcp \
+  --header "Authorization: Bearer <MCP_AUTH_TOKEN>"
+```
+
+Running it as a service: put the three variables in a file readable only by
+the service user (`chmod 600`) and load it from a launchd/systemd unit or a
+small wrapper script. Run a single instance: the request nonce counter lives in
+memory. Browser-style cross-origin requests are rejected, and the token is
+never logged.
+
 ## Known quirks (learned the hard way)
 
 - **`getHistoricalCurrency` and `getHistoricalSummary` ignore date/currency
@@ -121,7 +160,7 @@ methods yet.
 
 ```
 pkg/cointracking/ library package — the API client (Call, GetBalance, GetGroupedBalance, GetTrades, ...)
-cmd/mcp/          the MCP server (see above)
+cmd/mcp/          the MCP server: stdio (main.go) and Streamable HTTP (http.go)
 ```
 
 ### API surface (`cointracking` package)

@@ -1,9 +1,13 @@
 // Command cointracking-mcp exposes the CoinTracking API as an MCP (Model
-// Context Protocol) server over stdio, for use with Claude Code, Claude
-// Desktop, or any other MCP client.
+// Context Protocol) server, for use with Claude Code, Claude Desktop, or any
+// other MCP client.
 //
-// Auth is read once at startup from COINTRACKING_KEY / COINTRACKING_SECRET
-// env vars (set them wherever you register the server, e.g. `claude mcp add`).
+// By default it speaks MCP over stdio. With -http <addr> (or MCP_HTTP_ADDR) it
+// instead serves Streamable HTTP at /mcp, protected by the bearer token in
+// MCP_AUTH_TOKEN; see the README's "Remote (HTTP) mode" section.
+//
+// CoinTracking credentials are read once at startup from COINTRACKING_KEY /
+// COINTRACKING_SECRET env vars.
 //
 // Tools exposed:
 //   - cointracking_get_balance          -> Client.GetBalance
@@ -15,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/url"
@@ -190,18 +195,31 @@ func newMCPServer(client *ct.Client) *mcp.Server {
 func main() {
 	log.SetFlags(0) // stderr goes to the MCP client's log; timestamps are added there
 
+	httpAddr := flag.String("http", os.Getenv("MCP_HTTP_ADDR"), "serve Streamable HTTP on this address (e.g. 127.0.0.1:8080) instead of stdio; bearer token from MCP_AUTH_TOKEN")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file (HTTP mode; omit when a proxy terminates TLS)")
+	tlsKey := flag.String("tls-key", "", "TLS private key file (HTTP mode)")
+	flag.Parse()
+
 	key := os.Getenv("COINTRACKING_KEY")
 	secret := os.Getenv("COINTRACKING_SECRET")
 	if key == "" || secret == "" {
 		log.Fatal("set COINTRACKING_KEY and COINTRACKING_SECRET env vars before starting the server")
 	}
 
-	// Shut down cleanly when the MCP client sends SIGINT/SIGTERM (or the
-	// terminal closes); in-flight HTTP requests are cancelled via ctx.
+	// Shut down cleanly on SIGINT/SIGTERM (the MCP client closing us, or the
+	// service manager stopping us); in-flight HTTP requests are cancelled via ctx.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	srv := newMCPServer(ct.NewClient(key, secret))
+
+	if *httpAddr != "" {
+		if err := serveHTTP(ctx, *httpAddr, os.Getenv("MCP_AUTH_TOKEN"), *tlsCert, *tlsKey, srv); err != nil {
+			log.Fatalf("http server failed: %v", err)
+		}
+		return
+	}
+
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
 		log.Fatalf("server failed: %v", err)
 	}
